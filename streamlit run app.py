@@ -25,54 +25,57 @@ if 'input_batter' not in st.session_state:
 def add_advanced_stats(df):
     """結果のテキストから打数や安打などのフラグを生成し、打球方向を30度ずつに分類する"""
     df = df.copy()
-    # 1. 基本的なフラグの作成
-    df['is_PA'] = 1
-    df['is_BB_HBP'] = df['結果'].str.contains('四球|死球|敬遠', na=False)
-    df['is_SAC'] = df['結果'].str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
-    df['is_SF'] = df['結果'].str.contains('犠飛|犠牲フライ', na=False)
-    df['is_SO'] = df['結果'].str.contains('三振', na=False)
+    res = df['結果'].fillna('')
     
-    df['is_H'] = df['結果'].str.contains('安打|ヒット|二塁打|ツーベース|三塁打|スリーベース|本塁打|ホームラン', na=False)
-    df['is_2B'] = df['結果'].str.contains('二塁打|ツーベース', na=False)
-    df['is_3B'] = df['結果'].str.contains('三塁打|スリーベース', na=False)
-    df['is_HR'] = df['結果'].str.contains('本塁打|ホームラン', na=False)
+    # 1. 基本的なフラグの作成（int8型を使ってメモリを極限まで節約）
+    df['is_PA'] = np.int8(1)
+    df['is_BB_HBP'] = res.str.contains('四球|死球|敬遠', na=False)
+    df['is_SAC'] = res.str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
+    df['is_SF'] = res.str.contains('犠飛|犠牲フライ', na=False)
+    df['is_SO'] = res.str.contains('三振', na=False)
+    
+    df['is_H'] = res.str.contains('安打|ヒット|二塁打|ツーベース|三塁打|スリーベース|本塁打|ホームラン', na=False)
+    df['is_2B'] = res.str.contains('二塁打|ツーベース', na=False)
+    df['is_3B'] = res.str.contains('三塁打|スリーベース', na=False)
+    df['is_HR'] = res.str.contains('本塁打|ホームラン', na=False)
     df['is_1B'] = df['is_H'] & ~df['is_2B'] & ~df['is_3B'] & ~df['is_HR']
     
-    df['is_AB'] = df['is_PA'] - df['is_BB_HBP'].astype(int) - df['is_SAC'].astype(int)
-    df['TB'] = df['is_1B'].astype(int)*1 + df['is_2B'].astype(int)*2 + df['is_3B'].astype(int)*3 + df['is_HR'].astype(int)*4
+    df['is_AB'] = df['is_PA'] - df['is_BB_HBP'].astype('int8') - df['is_SAC'].astype('int8')
+    df['TB'] = df['is_1B'].astype('int8')*1 + df['is_2B'].astype('int8')*2 + df['is_3B'].astype('int8')*3 + df['is_HR'].astype('int8')*4
     
-    # 2. 打球方向と内訳用の分類
-    def get_dir_and_res(res):
-        res = str(res)
-        # 結果カテゴリの内訳
-        if '本塁打' in res or 'ホームラン' in res: r_cat = '本塁打'
-        elif any(w in res for w in ['二塁打', '三塁打', 'ツーベース', 'スリーベース']): r_cat = '長打(二・三塁打)'
-        elif '安打' in res or 'ヒット' in res: r_cat = '単打'
-        elif '犠' in res: r_cat = '犠打/犠飛'
-        elif '併殺' in res: r_cat = '併殺打'
-        elif '三振' in res or any(w in res for w in ['四球', '死球', '敬遠']): r_cat = '非打球(三振/四死球)'
-        else: r_cat = '凡打/アウト'
-        
-        # 扇形グラウンド用 30度ごとの方向判定
-        if '邪' in res: 
-            if any(w in res for w in ['左', '三']): d_cat = '左ファウル'
-            elif any(w in res for w in ['右', '一']): d_cat = '右ファウル'
-            else: d_cat = '後ろファウル'
-        else:
-            if any(w in res for w in ['左', '三', '遊']): d_cat = '左方向'
-            elif any(w in res for w in ['中', '投', '捕']): d_cat = 'センター'
-            elif any(w in res for w in ['右', '一', '二']): d_cat = '右方向'
-            else: d_cat = '不明'
+    # 2. 🌟ベクトル化による超高速・省メモリな打球方向と結果の分類処理
+    # 結果カテゴリの内訳
+    r_cat = np.where(res.str.contains('本塁打|ホームラン'), '本塁打',
+            np.where(res.str.contains('二塁打|三塁打|ツーベース|スリーベース'), '長打(二・三塁打)',
+            np.where(res.str.contains('安打|ヒット'), '単打',
+            np.where(res.str.contains('犠'), '犠打/犠飛',
+            np.where(res.str.contains('併殺'), '併殺打',
+            np.where(res.str.contains('三振|四球|死球|敬遠'), '非打球(三振/四死球)',
+            '凡打/アウト'))))))
+    
+    # 扇形グラウンド用 30度ごとの方向判定
+    is_foul = res.str.contains('邪')
+    is_left = res.str.contains('左|三|遊')
+    is_center = res.str.contains('中|投|捕')
+    is_right = res.str.contains('右|一|二')
+    
+    d_cat = np.where(is_foul & is_left, '左ファウル',
+            np.where(is_foul & is_right, '右ファウル',
+            np.where(is_foul, '後ろファウル',
+            np.where(~is_foul & is_left, '左方向',
+            np.where(~is_foul & is_center, 'センター',
+            np.where(~is_foul & is_right, '右方向', '不明'))))))
             
-        return pd.Series([d_cat, r_cat])
-        
-    df[['打球方向_30', '打球結果_詳細']] = df['結果'].apply(get_dir_and_res)
+    df['打球結果_詳細'] = r_cat
+    df['打球方向_30'] = d_cat
+    
     if '打点' not in df.columns:
         df['打点'] = 0
         
     return df
 
-@st.cache_data
+# 🌟メモリ節約のためキャッシュは最新の1つだけ保持する
+@st.cache_data(max_entries=1)
 def load_and_clean_data():
     try:
         df = pd.read_parquet("all_matchup_data.parquet")
@@ -99,9 +102,14 @@ def load_and_clean_data():
     df.loc[(df['打者'] == '拓也') & (df['年度'] >= 2026) & (df['打者チーム'] == 'ヤクルト'), '打者'] = '矢崎拓也'
 
     df = add_advanced_stats(df)
+    
+    # 🌟超重要：オブジェクト（文字列）をカテゴリ型に変換し、RAM消費量を約1/10に削減！
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype('category')
+        
     return df, None
 
-@st.cache_data
+@st.cache_data(max_entries=1)
 def load_directories():
     files = glob.glob("player_directory_*.csv")
     df_list = []
