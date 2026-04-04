@@ -280,7 +280,7 @@ else:
 
     st.markdown("---")
 
-    # --- 🏟️ 打球方向と内訳の扇形チャート (Plotly Barpolar) ---
+    # --- 🏟️ 打球方向と内訳の扇形チャート (Plotly Barpolar & Scatterpolar) ---
     st.markdown("#### 🏟️ 打球方向と結果の内訳 (30度ごとの扇形分割)")
     
     dir_order = ['左ファウル', '左方向', 'センター', '右方向', '右ファウル']
@@ -298,28 +298,49 @@ else:
         res_order = ['凡打/アウト', '併殺打', '犠打/犠飛', '単打', '長打(二・三塁打)', '本塁打']
         colors = ['#CFD8DC', '#90A4AE', '#81C784', '#4FC3F7', '#FF9800', '#E53935']
         
+        # 文字を配置する高さを記録する配列（5つの方向分）
+        cumulative_r = np.zeros(5)
+        
         for r_type, color in zip(res_order, colors):
             sub_df = agg_df[agg_df['打球結果_詳細'] == r_type]
-            r_vals, texts = [], []
+            r_vals = []
             for d in dir_order:
                 val = sub_df[sub_df['打球方向_30'] == d]['回数'].sum()
                 r_vals.append(val)
-                # 0の場合はテキスト非表示にしてスッキリさせる
-                texts.append(f"{val}" if val > 0 else "")
                 
+            # 1. 棒（扇形）の描画
             fig.add_trace(go.Barpolar(
                 r=r_vals,
                 theta=theta_vals,
-                width=[30]*5,
+                width=30, # エラー回避のためスカラー値に修正
                 name=r_type,
-                marker_color=color,
-                marker_line_color='white',
-                marker_line_width=1,
-                text=texts,
-                textposition='inside',
-                textfont=dict(color='white' if r_type in ['本塁打', '長打(二・三塁打)', '併殺打'] else 'black', size=14),
+                marker=dict(
+                    color=color,
+                    line=dict(color='white', width=1)
+                ),
                 hoverinfo="name+r"
             ))
+            
+            # 2. 内訳の数字（テキスト）の描画
+            # スタックの中央の高さに文字を配置する
+            text_r = cumulative_r + np.array(r_vals) / 2
+            texts = [f"{val}" if val > 0 else "" for val in r_vals]
+            
+            fig.add_trace(go.Scatterpolar(
+                r=text_r,
+                theta=theta_vals,
+                mode='text',
+                text=texts,
+                textfont=dict(
+                    color='white' if r_type in ['本塁打', '長打(二・三塁打)', '併殺打'] else 'black', 
+                    size=14
+                ),
+                hoverinfo='skip',
+                showlegend=False
+            ))
+            
+            # 次のカテゴリのために高さを加算
+            cumulative_r += np.array(r_vals)
 
         fig.update_layout(
             polar=dict(
