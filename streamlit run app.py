@@ -3,8 +3,8 @@ import pandas as pd
 import json
 import os
 import glob
-import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
 
 # ページ設定
 st.set_page_config(page_title="⚾ NPB データ分析ダッシュボード", layout="wide")
@@ -22,24 +22,55 @@ if 'input_batter' not in st.session_state:
 # =====================================================================
 # データ前処理・クレンジング関数
 # =====================================================================
-def clean_detail_result(text):
-    """詳細結果から「左」「右」などの方向を排除し、純粋な結果に変換する関数"""
-    if pd.isna(text): return text
-    text = str(text)
-    if '三振' in text: return '三振'
-    if any(w in text for w in ['四球', '死球', '敬遠']): return '四死球'
-    if '犠打' in text or '犠牲バント' in text: return '犠打'
-    if '犠飛' in text: return '犠飛'
-    if '本塁打' in text or 'ホームラン' in text: return '本塁打'
-    if '三塁打' in text: return '三塁打'
-    if '二塁打' in text: return '二塁打'
-    if '安打' in text or 'ヒット' in text: return '単打'
-    if '併殺' in text: return '併殺打'
-    if 'ゴロ' in text: return 'ゴロ'
-    if '飛' in text or 'フライ' in text: return 'フライ'
-    if '直' in text or 'ライナー' in text: return 'ライナー'
-    if '邪飛' in text: return 'ファウルフライ'
-    return 'その他'
+def add_advanced_stats(df):
+    """結果のテキストから打数や安打などのフラグを生成し、打球方向を30度ずつに分類する"""
+    df = df.copy()
+    # 1. 基本的なフラグの作成
+    df['is_PA'] = 1
+    df['is_BB_HBP'] = df['結果'].str.contains('四球|死球|敬遠', na=False)
+    df['is_SAC'] = df['結果'].str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
+    df['is_SF'] = df['結果'].str.contains('犠飛|犠牲フライ', na=False)
+    df['is_SO'] = df['結果'].str.contains('三振', na=False)
+    
+    df['is_H'] = df['結果'].str.contains('安打|ヒット|二塁打|ツーベース|三塁打|スリーベース|本塁打|ホームラン', na=False)
+    df['is_2B'] = df['結果'].str.contains('二塁打|ツーベース', na=False)
+    df['is_3B'] = df['結果'].str.contains('三塁打|スリーベース', na=False)
+    df['is_HR'] = df['結果'].str.contains('本塁打|ホームラン', na=False)
+    df['is_1B'] = df['is_H'] & ~df['is_2B'] & ~df['is_3B'] & ~df['is_HR']
+    
+    df['is_AB'] = df['is_PA'] - df['is_BB_HBP'].astype(int) - df['is_SAC'].astype(int)
+    df['TB'] = df['is_1B'].astype(int)*1 + df['is_2B'].astype(int)*2 + df['is_3B'].astype(int)*3 + df['is_HR'].astype(int)*4
+    
+    # 2. 打球方向と内訳用の分類
+    def get_dir_and_res(res):
+        res = str(res)
+        # 結果カテゴリの内訳
+        if '本塁打' in res or 'ホームラン' in res: r_cat = '本塁打'
+        elif any(w in res for w in ['二塁打', '三塁打', 'ツーベース', 'スリーベース']): r_cat = '長打(二・三塁打)'
+        elif '安打' in res or 'ヒット' in res: r_cat = '単打'
+        elif '犠' in res: r_cat = '犠打/犠飛'
+        elif '併殺' in res: r_cat = '併殺打'
+        elif '三振' in res or any(w in res for w in ['四球', '死球', '敬遠']): r_cat = '非打球(三振/四死球)'
+        else: r_cat = '凡打/アウト'
+        
+        # 扇形グラウンド用 30度ごとの方向判定
+        if '邪' in res: 
+            if any(w in res for w in ['左', '三']): d_cat = '左ファウル'
+            elif any(w in res for w in ['右', '一']): d_cat = '右ファウル'
+            else: d_cat = '後ろファウル'
+        else:
+            if any(w in res for w in ['左', '三', '遊']): d_cat = '左方向'
+            elif any(w in res for w in ['中', '投', '捕']): d_cat = 'センター'
+            elif any(w in res for w in ['右', '一', '二']): d_cat = '右方向'
+            else: d_cat = '不明'
+            
+        return pd.Series([d_cat, r_cat])
+        
+    df[['打球方向_30', '打球結果_詳細']] = df['結果'].apply(get_dir_and_res)
+    if '打点' not in df.columns:
+        df['打点'] = 0
+        
+    return df
 
 @st.cache_data
 def load_and_clean_data():
@@ -51,7 +82,6 @@ def load_and_clean_data():
     if '年度' not in df.columns:
         df['年度'] = pd.to_datetime(df['日付']).dt.year
 
-    # 名寄せ処理
     aliases_file = "npb_official_aliases.json"
     if os.path.exists(aliases_file):
         with open(aliases_file, "r", encoding="utf-8") as f:
@@ -59,44 +89,38 @@ def load_and_clean_data():
         df['投手'] = df['投手'].replace(player_aliases)
         df['打者'] = df['打者'].replace(player_aliases)
         
-        manual_aliases = {
-            "Ｔ－岡田": "T-岡田", "Ｔ-岡田": "T-岡田",
-            "Ｃ．Ｃ．メルセデス": "C.C.メルセデス", "Ｒ．マルティネス": "R.マルティネス",
-            "Ｌ．モイネロ": "L.モイネロ"
-        }
+        manual_aliases = {"Ｔ－岡田": "T-岡田", "Ｔ-岡田": "T-岡田", "Ｃ．Ｃ．メルセデス": "C.C.メルセデス", "Ｒ．マルティネス": "R.マルティネス", "Ｌ．モイネロ": "L.モイネロ"}
         df['投手'] = df['投手'].replace(manual_aliases)
         df['打者'] = df['打者'].replace(manual_aliases)
 
-    # 同姓同名・改名の例外処理
     df.loc[(df['投手'] == '拓也') & (df['年度'] <= 2016) & (df['投手チーム'] == 'ソフトバンク'), '投手'] = '甲斐拓也'
     df.loc[(df['打者'] == '拓也') & (df['年度'] <= 2016) & (df['打者チーム'] == 'ソフトバンク'), '打者'] = '甲斐拓也'
     df.loc[(df['投手'] == '拓也') & (df['年度'] >= 2026) & (df['投手チーム'] == 'ヤクルト'), '投手'] = '矢崎拓也'
     df.loc[(df['打者'] == '拓也') & (df['年度'] >= 2026) & (df['打者チーム'] == 'ヤクルト'), '打者'] = '矢崎拓也'
 
-    # 方向を排除した詳細結果の列を作成
-    df['純粋な結果'] = df['結果'].apply(clean_detail_result)
-
+    df = add_advanced_stats(df)
     return df, None
 
 @st.cache_data
 def load_directories():
-    """Gitにアップされた全年度の選手名鑑を結合してマスター化する"""
     files = glob.glob("player_directory_*.csv")
     df_list = []
     for f in files:
-        try:
-            df_list.append(pd.read_csv(f))
-        except:
-            pass
+        try: df_list.append(pd.read_csv(f))
+        except: pass
     if df_list:
-        df_dir = pd.concat(df_list, ignore_index=True).drop_duplicates(subset=['チーム', '選手名'])
-        return df_dir
+        return pd.concat(df_list, ignore_index=True).drop_duplicates(subset=['チーム', '選手名'])
     return pd.DataFrame()
+
+def format_rate(val):
+    """打率などを .333 のようなフォーマットにする"""
+    if val >= 1.0: return f"{val:.3f}"
+    return f".{str(int(val * 1000)).zfill(3)}"
 
 # =====================================================================
 # UI 構築とサイドバー
 # =====================================================================
-st.title("⚾ NPB 投手 vs 打者 分析ダッシュボード")
+st.title("⚾ NPB 超高度データ分析ダッシュボード")
 
 with st.spinner("データを準備しています..."):
     df, error_msg = load_and_clean_data()
@@ -112,34 +136,42 @@ st.sidebar.header("🔍 分析設定")
 team_options = ["全球団", "巨人", "阪神", "中日", "DeNA", "広島", "ヤクルト", "オリックス", "ロッテ", "ソフトバンク", "楽天", "西武", "日本ハム"]
 selected_team = st.sidebar.selectbox("球団で絞り込み", team_options)
 
-# 球団が選ばれている場合、名鑑からその球団の選手一覧をヒントとして表示
 if selected_team != "全球団" and not df_dir.empty:
     team_players = df_dir[df_dir['チーム'] == selected_team]['選手名'].unique()
     with st.sidebar.expander(f"💡 {selected_team} の所属選手一覧"):
         st.write("、".join(sorted(team_players)))
 
-# データ絞り込み（球団）
 filtered_df = df.copy()
 if selected_team != "全球団":
-    # 投手か打者どちらかがその球団である試合に絞る
     filtered_df = filtered_df[(filtered_df['投手チーム'] == selected_team) | (filtered_df['打者チーム'] == selected_team)]
 
-# --- 2. モード選択と記入式入力 ---
-analysis_mode = st.sidebar.radio(
-    "分析モード",
-    ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"]
-)
+years = sorted(filtered_df['年度'].unique(), reverse=True)
+selected_year = st.sidebar.selectbox("表示する年度", ["全年度"] + list(years))
+if selected_year != "全年度":
+    filtered_df = filtered_df[filtered_df['年度'] == selected_year]
+
+# --- 2. 予測変換（インクリメンタルサーチ）付きの選手選択 ---
+all_pitchers = sorted(filtered_df['投手'].dropna().unique())
+all_batters = sorted(filtered_df['打者'].dropna().unique())
+all_players = sorted(list(set(all_pitchers) | set(all_batters)))
+player_options = [""] + all_players
+
+analysis_mode = st.sidebar.radio("分析モード", ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"])
 
 if analysis_mode == "投手視点で分析":
-    selected_pitcher = st.sidebar.text_input("投手名を入力 (フルネーム)", value=st.session_state.input_pitcher)
+    idx = player_options.index(st.session_state.input_pitcher) if st.session_state.input_pitcher in player_options else 0
+    selected_pitcher = st.sidebar.selectbox("投手を選択 (タイピングで予測変換)", player_options, index=idx)
     st.session_state.input_pitcher = selected_pitcher
 elif analysis_mode == "打者視点で分析":
-    selected_batter = st.sidebar.text_input("打者名を入力 (フルネーム)", value=st.session_state.input_batter)
+    idx = player_options.index(st.session_state.input_batter) if st.session_state.input_batter in player_options else 0
+    selected_batter = st.sidebar.selectbox("打者を選択 (タイピングで予測変換)", player_options, index=idx)
     st.session_state.input_batter = selected_batter
 else:
-    col_p, col_b = st.sidebar.columns(2)
-    selected_pitcher = col_p.text_input("投手名", value=st.session_state.input_pitcher)
-    selected_batter = col_b.text_input("打者名", value=st.session_state.input_batter)
+    st.sidebar.caption("※タイピングで予測変換されます")
+    idx_p = player_options.index(st.session_state.input_pitcher) if st.session_state.input_pitcher in player_options else 0
+    idx_b = player_options.index(st.session_state.input_batter) if st.session_state.input_batter in player_options else 0
+    selected_pitcher = st.sidebar.selectbox("投手", player_options, index=idx_p)
+    selected_batter = st.sidebar.selectbox("打者", player_options, index=idx_b)
     st.session_state.input_pitcher = selected_pitcher
     st.session_state.input_batter = selected_batter
 
@@ -154,164 +186,149 @@ if st.sidebar.button("追加する"):
         st.rerun()
 
 if st.session_state.favorites:
-    st.sidebar.caption("↓ クリックで入力欄にセット")
+    st.sidebar.caption("↓ クリックで入力欄に自動セット")
     for fav in st.session_state.favorites:
         cols = st.sidebar.columns([3, 1])
         if cols[0].button(f"👤 {fav}", key=f"set_{fav}"):
-            # クリックされたらモードに応じて入力状態を上書きして再描画
-            if analysis_mode == "投手視点で分析":
-                st.session_state.input_pitcher = fav
-            elif analysis_mode == "打者視点で分析":
-                st.session_state.input_batter = fav
+            if analysis_mode == "投手視点で分析": st.session_state.input_pitcher = fav
+            elif analysis_mode == "打者視点で分析": st.session_state.input_batter = fav
             else:
-                # 特定対戦モードの場合は、空いている方に入れる（簡易的）
-                if not st.session_state.input_pitcher:
-                    st.session_state.input_pitcher = fav
-                else:
-                    st.session_state.input_batter = fav
+                if not st.session_state.input_pitcher: st.session_state.input_pitcher = fav
+                else: st.session_state.input_batter = fav
             st.rerun()
-            
         if cols[1].button("✖", key=f"del_{fav}"):
             st.session_state.favorites.remove(fav)
             st.rerun()
 
-st.sidebar.markdown("---")
-years = sorted(filtered_df['年度'].unique(), reverse=True)
-selected_year = st.sidebar.selectbox("表示する年度", ["全年度"] + list(years))
-
 # =====================================================================
-# データ抽出と表示
+# データ抽出とスタッツ表示
 # =====================================================================
-if selected_year != "全年度":
-    filtered_df = filtered_df[filtered_df['年度'] == selected_year]
-
-# モードに応じたデータの決定
 if analysis_mode == "投手視点で分析":
-    if not selected_pitcher:
-        st.info("👈 サイドバーから投手名を入力してください。")
-        st.stop()
+    if not selected_pitcher: st.stop()
     target_df = filtered_df[filtered_df['投手'] == selected_pitcher]
     title_text = f"📊 {selected_pitcher} 投手のデータ"
-
 elif analysis_mode == "打者視点で分析":
-    if not selected_batter:
-        st.info("👈 サイドバーから打者名を入力してください。")
-        st.stop()
+    if not selected_batter: st.stop()
     target_df = filtered_df[filtered_df['打者'] == selected_batter]
     title_text = f"📊 {selected_batter} 打者のデータ"
-
 else:
-    if not selected_pitcher or not selected_batter:
-        st.info("👈 サイドバーから投手名と打者名の両方を入力してください。")
-        st.stop()
+    if not selected_pitcher or not selected_batter: st.stop()
     target_df = filtered_df[(filtered_df['投手'] == selected_pitcher) & (filtered_df['打者'] == selected_batter)]
     title_text = f"⚔️ {selected_pitcher} vs {selected_batter}"
 
-# 年度の表示追加
 st.subheader(f"{title_text} ({selected_year})")
 
 if target_df.empty:
-    st.warning("該当する対戦データがありません。名前が正しいか、球団や年度の絞り込みを解除してお試しください。")
+    st.warning("該当する対戦データがありません。")
 else:
-    # --- 指標計算 ---
-    total_pa = len(target_df)
-    hits = len(target_df[target_df['打席結果'] == '安打'])
-    at_bats = len(target_df[target_df['打席結果'].isin(['安打', '凡打', '三振'])])
-    avg = hits / at_bats if at_bats > 0 else 0.000
+    # --- 📈 全基本スタッツの計算 ---
+    stats = {
+        'PA': target_df['is_PA'].sum(),
+        'AB': target_df['is_AB'].sum(),
+        'H': target_df['is_H'].sum(),
+        'HR': target_df['is_HR'].sum(),
+        'RBI': target_df['打点'].sum(),
+        'SO': target_df['is_SO'].sum(),
+        'BB': target_df['is_BB_HBP'].sum(),
+    }
+    ab, h, bb, sf = stats['AB'], stats['H'], stats['BB'], target_df['is_SF'].sum()
+    tb = target_df['TB'].sum()
     
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("総対戦打席数", f"{total_pa} 打席")
-    col2.metric("打数", f"{at_bats} 打数")
-    col3.metric("安打数", f"{hits} 本")
-    col4.metric("打率", f".{str(int(avg * 1000)).zfill(3)}")
+    stats['AVG'] = h / ab if ab > 0 else 0.0
+    stats['OBP'] = (h + bb) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
+    stats['SLG'] = tb / ab if ab > 0 else 0.0
+    stats['OPS'] = stats['OBP'] + stats['SLG']
+
+    # --- 📈 スタッツの表示 ---
+    st.markdown("#### 📈 基本指標")
+    
+    # カスタムCSSでMetricsを見やすくする
+    st.markdown("""
+    <style>
+    div[data-testid="metric-container"] {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        padding: 5% 5% 5% 10%;
+        border-radius: 5px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("打席", stats['PA'])
+    c2.metric("打数", stats['AB'])
+    c3.metric("安打", stats['H'])
+    c4.metric("本塁打", stats['HR'])
+    c5.metric("打点", stats['RBI'])
+    c6.metric("三振", stats['SO'])
+    c7.metric("四死球", stats['BB'])
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    c8, c9, c10, c11 = st.columns(4)
+    c8.metric("打率 (AVG)", format_rate(stats['AVG']))
+    c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
+    c10.metric("長打率 (SLG)", format_rate(stats['SLG']))
+    c11.metric("OPS", format_rate(stats['OPS']))
 
     st.markdown("---")
 
-    # --- グラフ描画（方向抜き詳細 ＆ 割合） ---
-    col_g1, col_g2 = st.columns(2)
+    # --- 🏟️ 打球方向と内訳の扇形チャート (Plotly Barpolar) ---
+    st.markdown("#### 🏟️ 打球方向と結果の内訳 (30度ごとの扇形分割)")
     
-    with col_g1:
-        st.markdown("#### 🎯 打席結果の内訳")
-        result_counts = target_df['打席結果'].value_counts().reset_index()
-        result_counts.columns = ['打席結果', '回数']
-        fig1 = px.pie(result_counts, values='回数', names='打席結果', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with col_g2:
-        st.markdown("#### ⚾ 詳細な結果 (方向なし)")
-        # 🌟 ここで「左飛」などが「フライ」に変換された「純粋な結果」を使用します
-        detail_counts = target_df['純粋な結果'].value_counts().head(10).reset_index()
-        detail_counts.columns = ['結果', '回数']
-        fig2 = px.bar(detail_counts, x='回数', y='結果', orientation='h', color='回数', color_continuous_scale='Blues')
-        fig2.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-
-    # --- 🌟 打球方向の図解可視化 ---
-    st.markdown("#### 🏟️ 飛びやすい打球方向")
+    dir_order = ['左ファウル', '左方向', 'センター', '右方向', '右ファウル']
+    theta_vals = [150, 120, 90, 60, 30] # 15度〜165度の中で各30度の中心角
     
-    dir_counts = target_df['打球方向'].value_counts()
-    left = dir_counts.get('左', 0)
-    center = dir_counts.get('中', 0)
-    right = dir_counts.get('右', 0)
-    total_dir = left + center + right
+    plot_df = target_df[~target_df['打球方向_30'].isin(['不明', '後ろファウル']) & (target_df['打球結果_詳細'] != '非打球(三振/四死球)')]
     
-    if total_dir > 0:
-        left_pct = (left / total_dir) * 100
-        center_pct = (center / total_dir) * 100
-        right_pct = (right / total_dir) * 100
-        
-        fig_dir = go.Figure()
-
-        # グラウンドの外野芝生（扇形）
-        fig_dir.add_trace(go.Scatter(
-            x=[0, -1.2, 0, 1.2, 0], 
-            y=[0, 1.2, 1.7, 1.2, 0],
-            mode='lines', fill='toself', fillcolor='#e0f2e0',
-            line=dict(color='white', width=3), hoverinfo='skip'
-        ))
-        
-        # グラウンドの内野土
-        fig_dir.add_trace(go.Scatter(
-            x=[0, -0.6, 0, 0.6, 0], 
-            y=[0, 0.6, 0.85, 0.6, 0],
-            mode='lines', fill='toself', fillcolor='#f2e6d9',
-            line=dict(color='white', width=2), hoverinfo='skip'
-        ))
-
-        # バブルの大きさを件数に合わせて動的に変える（最小30〜最大80）
-        sizes = [left, center, right]
-        max_size = max(sizes) if max(sizes) > 0 else 1
-        marker_sizes = [(s/max_size)*50 + 30 for s in sizes]
-
-        # 左・中・右にバブルとテキストを配置
-        fig_dir.add_trace(go.Scatter(
-            x=[-0.7, 0, 0.7],
-            y=[1.1, 1.4, 1.1],
-            mode='markers+text',
-            marker=dict(
-                size=marker_sizes,
-                color=['#FF9999', '#99CCFF', '#FFCC99'],
-                line=dict(color='white', width=2)
-            ),
-            text=[f"左方向<br>{left}本<br>({left_pct:.1f}%)", 
-                  f"センター<br>{center}本<br>({center_pct:.1f}%)", 
-                  f"右方向<br>{right}本<br>({right_pct:.1f}%)"],
-            textposition='middle center',
-            textfont=dict(color='black', size=14, weight='bold'),
-            hoverinfo='none'
-        ))
-
-        fig_dir.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.5, 1.5]),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.1, 1.9]),
-            plot_bgcolor='white',
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=False,
-            height=350
-        )
-        
-        st.plotly_chart(fig_dir, use_container_width=True)
+    if plot_df.empty:
+        st.info("※ この条件ではグラウンドに飛んだ打球のデータがありません（三振や四死球のみなど）")
     else:
-        st.info("この条件では打球方向が記録されたデータ（安打や凡打など）がありません。（三振や四死球のみなど）")
+        agg_df = plot_df.groupby(['打球方向_30', '打球結果_詳細']).size().reset_index(name='回数')
+        fig = go.Figure()
+        
+        # 内訳の順番とカラー設定（下から積み上げ）
+        res_order = ['凡打/アウト', '併殺打', '犠打/犠飛', '単打', '長打(二・三塁打)', '本塁打']
+        colors = ['#CFD8DC', '#90A4AE', '#81C784', '#4FC3F7', '#FF9800', '#E53935']
+        
+        for r_type, color in zip(res_order, colors):
+            sub_df = agg_df[agg_df['打球結果_詳細'] == r_type]
+            r_vals, texts = [], []
+            for d in dir_order:
+                val = sub_df[sub_df['打球方向_30'] == d]['回数'].sum()
+                r_vals.append(val)
+                # 0の場合はテキスト非表示にしてスッキリさせる
+                texts.append(f"{val}" if val > 0 else "")
+                
+            fig.add_trace(go.Barpolar(
+                r=r_vals,
+                theta=theta_vals,
+                width=[30]*5,
+                name=r_type,
+                marker_color=color,
+                marker_line_color='white',
+                marker_line_width=1,
+                text=texts,
+                textposition='inside',
+                textfont=dict(color='white' if r_type in ['本塁打', '長打(二・三塁打)', '併殺打'] else 'black', size=14),
+                hoverinfo="name+r"
+            ))
+
+        fig.update_layout(
+            polar=dict(
+                sector=[15, 165], # フェアゾーン90度＋両ファウル30度ずつの合計150度
+                hole=0.2,         # ホームベース付近を空ける
+                radialaxis=dict(showticklabels=False, ticks=''),
+                angularaxis=dict(
+                    tickmode='array',
+                    tickvals=theta_vals,
+                    ticktext=['左ファウル<br>(135-165°)', '左方向<br>(105-135°)', 'センター<br>(75-105°)', '右方向<br>(45-75°)', '右ファウル<br>(15-45°)'],
+                    direction='counterclockwise',
+                    tickfont=dict(size=13, weight="bold")
+                )
+            ),
+            barmode='stack', # 積み上げモード
+            height=500,
+            margin=dict(t=40, b=40, l=40, r=40),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5, font=dict(size=14))
+        )
+        st.plotly_chart(fig, use_container_width=True)
