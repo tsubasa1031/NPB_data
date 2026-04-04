@@ -28,7 +28,7 @@ def add_advanced_stats(df):
     df = df.copy()
     res = df['結果'].fillna('')
     
-    # 1. 基本的なフラグの作成（int8型を使ってメモリを極限まで節約）
+    # 1. 基本的なフラグの作成
     df['is_PA'] = np.int8(1)
     df['is_BB_HBP'] = res.str.contains('四球|死球|敬遠', na=False)
     df['is_SAC'] = res.str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
@@ -80,7 +80,6 @@ def add_advanced_stats(df):
         
     return df
 
-# 🌟メモリ節約のためキャッシュは最新の1つだけ保持する
 @st.cache_data(max_entries=1)
 def load_and_clean_data():
     try:
@@ -109,7 +108,6 @@ def load_and_clean_data():
 
     df = add_advanced_stats(df)
     
-    # 🌟超重要：オブジェクト（文字列）をカテゴリ型に変換し、RAM消費量を約1/10に削減
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].astype('category')
         
@@ -147,13 +145,30 @@ if error_msg:
 
 st.sidebar.header("🔍 分析設定")
 
+# モード選択を先に配置
+analysis_mode = st.sidebar.radio("分析モード", ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"])
+
 team_options = ["全球団", "巨人", "阪神", "中日", "DeNA", "広島", "ヤクルト", "オリックス", "ロッテ", "ソフトバンク", "楽天", "西武", "日本ハム"]
 selected_team = st.sidebar.selectbox("球団で絞り込み", team_options)
 
+# 🌟 球団所属選手を「クリックで自動セット」するUIに変更
 if selected_team != "全球団" and not df_dir.empty:
-    team_players = df_dir[df_dir['チーム'] == selected_team]['選手名'].unique()
-    with st.sidebar.expander(f"💡 {selected_team} の所属選手一覧"):
-        st.write("、".join(sorted(team_players)))
+    team_players = sorted(df_dir[df_dir['チーム'] == selected_team]['選手名'].unique())
+    with st.sidebar.expander(f"💡 {selected_team} の所属選手 (クリックで自動入力)"):
+        cols = st.columns(2)
+        for i, p in enumerate(team_players):
+            # ボタンが押されたら、セッションステート（入力枠）に名前を放り込んで画面をリロード
+            if cols[i%2].button(p, key=f"btn_team_{p}"):
+                if analysis_mode == "投手視点で分析":
+                    st.session_state.input_pitcher = p
+                elif analysis_mode == "打者視点で分析":
+                    st.session_state.input_batter = p
+                else:
+                    if not st.session_state.input_pitcher:
+                        st.session_state.input_pitcher = p
+                    else:
+                        st.session_state.input_batter = p
+                st.rerun()
 
 filtered_df = df.copy()
 if selected_team != "全球団":
@@ -169,8 +184,7 @@ all_batters = sorted(filtered_df['打者'].dropna().unique())
 all_players = sorted(list(set(all_pitchers) | set(all_batters)))
 player_options = [""] + all_players
 
-analysis_mode = st.sidebar.radio("分析モード", ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"])
-
+# 予測変換入力欄
 if analysis_mode == "投手視点で分析":
     idx = player_options.index(st.session_state.input_pitcher) if st.session_state.input_pitcher in player_options else 0
     selected_pitcher = st.sidebar.selectbox("投手を選択 (タイピングで予測変換)", player_options, index=idx)
@@ -284,7 +298,7 @@ else:
 
     st.markdown("---")
 
-    # --- 📊 円グラフと詳細棒グラフ（復活） ---
+    # --- 📊 円グラフと詳細棒グラフ ---
     col_g1, col_g2 = st.columns(2)
     
     with col_g1:
@@ -304,99 +318,131 @@ else:
 
     st.markdown("---")
 
-    # --- 🏟️ 打球方向の扇形チャート (グラウンド型・バブル配置) ---
-    st.markdown("#### 🏟️ 飛びやすい打球方向 (30度ごとの扇形分割)")
+    # --- 🌟 打球方向の扇形チャート (ファウル排除・40%以上で色変更) ---
+    st.markdown("#### 🏟️ 飛びやすい打球方向 (フェアゾーンのみ)")
     
-    dir_counts = target_df['打球方向_30'].value_counts()
-    d_left_foul = dir_counts.get('左ファウル', 0)
-    d_left = dir_counts.get('左方向', 0)
-    d_center = dir_counts.get('センター', 0)
-    d_right = dir_counts.get('右方向', 0)
-    d_right_foul = dir_counts.get('右ファウル', 0)
-
-    total_dir = d_left_foul + d_left + d_center + d_right + d_right_foul
+    # ファウルや三振などを除外し、フェアグラウンドに飛んだ打球のみを抽出
+    fair_df = target_df[target_df['打球方向_30'].isin(['左方向', 'センター', '右方向'])]
+    total_fair = len(fair_df)
     
-    if total_dir > 0:
+    if total_fair > 0:
         fig_dir = go.Figure()
+        
+        directions = ['左方向', 'センター', '右方向']
+        thetas = [120, 90, 60]  # 各方向の中心角
+        
+        # 1. 扇形のベース色と、4割以上(Hot)の場合の強調色の定義
+        color_map = {
+            '左方向': {'normal': '#FFE0B2', 'hot': '#FFA726'},  # オレンジ系
+            'センター': {'normal': '#F5F5F5', 'hot': '#BDBDBD'},  # グレー系
+            '右方向': {'normal': '#F8BBD0', 'hot': '#EF5350'}   # ピンク/赤系
+        }
+        
+        text_x = []
+        text_y = []
+        texts = []
+        
+        # 2. 各方向ごとの扇形塗りつぶしと集計
+        for d, t in zip(directions, thetas):
+            d_df = fair_df[fair_df['打球方向_30'] == d]
+            cnt = len(d_df)
+            hit_cnt = len(d_df[d_df['is_H']]) # その方向への安打数
+            ratio = cnt / total_fair if total_fair > 0 else 0
+            
+            # 全体の40%以上飛んでいれば強調色にする
+            is_hot = ratio >= 0.4
+            fill_color = color_map[d]['hot'] if is_hot else color_map[d]['normal']
+            
+            # 扇形ポリゴンの描画（15度〜15度で30度の幅を作る）
+            start_angle = t - 15
+            end_angle = t + 15
+            theta_arc = np.linspace(start_angle, end_angle, 30) * np.pi / 180
+            x_arc = 1.7 * np.cos(theta_arc)
+            y_arc = 1.7 * np.sin(theta_arc)
+            
+            fig_dir.add_trace(go.Scatter(
+                x=[0] + list(x_arc) + [0],
+                y=[0] + list(y_arc) + [0],
+                mode='lines',
+                fill='toself',
+                fillcolor=fill_color,
+                line=dict(color='white', width=0),
+                hoverinfo='skip',
+                opacity=0.9
+            ))
+            
+            # テキストの内容を作成
+            rad_text = t * np.pi / 180
+            text_r = 1.1 # 円弧の中央あたりに文字を配置
+            text_x.append(text_r * np.cos(rad_text))
+            text_y.append(text_r * np.sin(rad_text))
+            
+            pct_str = f"{ratio*100:.0f}%"
+            # 画像のように数字を大きく、内訳（安打数）を小さく表示
+            if cnt > 0:
+                texts.append(f"<span style='font-size:28px'><b>{cnt}</b></span><br><span style='font-size:24px'><b>{pct_str}</b></span><br><span style='font-size:13px'>(内、安打{hit_cnt}本)</span>")
+            else:
+                texts.append("")
+                
+            # 扇形の外側に「左方向 (105-135°)」のようなラベルを添える
+            label_r = 1.85
+            fig_dir.add_trace(go.Scatter(
+                x=[label_r * np.cos(rad_text)],
+                y=[label_r * np.sin(rad_text)],
+                mode='text',
+                text=[f"{d}<br><span style='font-size:10px;color:gray'>({t-15}-{t+15}°)</span>"],
+                textfont=dict(color='gray', size=12),
+                hoverinfo='skip'
+            ))
 
-        # 1. 外野芝生（扇形 15度〜165度）
-        theta_outer = np.linspace(15, 165, 100) * np.pi / 180
-        x_outer = 1.7 * np.cos(theta_outer)
-        y_outer = 1.7 * np.sin(theta_outer)
+        # 3. グラウンドの外枠と区切り線を描く
+        # フェアゾーンの外枠線
+        theta_fair = np.linspace(45, 135, 100) * np.pi / 180
+        x_fair = 1.7 * np.cos(theta_fair)
+        y_fair = 1.7 * np.sin(theta_fair)
         fig_dir.add_trace(go.Scatter(
-            x=[0] + list(x_outer) + [0], 
-            y=[0] + list(y_outer) + [0],
-            mode='lines', fill='toself', fillcolor='#e0f2e0',
-            line=dict(color='white', width=3), hoverinfo='skip'
+            x=[0] + list(x_fair) + [0], 
+            y=[0] + list(y_fair) + [0],
+            mode='lines',
+            line=dict(color='black', width=2), hoverinfo='skip'
         ))
         
-        # 2. 内野土（扇形）
-        theta_inner = np.linspace(15, 165, 100) * np.pi / 180
-        x_inner = 0.85 * np.cos(theta_inner)
-        y_inner = 0.85 * np.sin(theta_inner)
+        # 内野の土のライン（デザインのアクセントとして白線）
+        theta_inner = np.linspace(45, 135, 50) * np.pi / 180
+        x_inner = 0.5 * np.cos(theta_inner)
+        y_inner = 0.5 * np.sin(theta_inner)
         fig_dir.add_trace(go.Scatter(
-            x=[0] + list(x_inner) + [0], 
-            y=[0] + list(y_inner) + [0],
-            mode='lines', fill='toself', fillcolor='#f2e6d9',
+            x=list(x_inner),
+            y=list(y_inner),
+            mode='lines',
             line=dict(color='white', width=2), hoverinfo='skip'
         ))
 
-        # 3. 扇形の区切り線（45度, 75度, 105度, 135度）
-        for angle in [45, 75, 105, 135]:
+        # 30度ごとの区切り線（75度, 105度）
+        for angle in [75, 105]:
             rad = angle * np.pi / 180
-            # ファウルライン(45, 135)は実線、中間線(75, 105)は点線
-            dash_style = 'dot' if angle in [75, 105] else 'solid'
             fig_dir.add_trace(go.Scatter(
                 x=[0, 1.7 * np.cos(rad)],
                 y=[0, 1.7 * np.sin(rad)],
                 mode='lines',
-                line=dict(color='white', width=2, dash=dash_style),
+                line=dict(color='white', width=2),
                 hoverinfo='skip'
             ))
 
-        # 4. バブルとテキストの配置
-        sizes = [d_left_foul, d_left, d_center, d_right, d_right_foul]
-        max_size = max(sizes) if max(sizes) > 0 else 1
-        marker_sizes = [(s/max_size)*45 + 30 for s in sizes]
-
-        angles_center = [150, 120, 90, 60, 30]
-        labels = ["左ファウル", "左方向", "センター", "右方向", "右ファウル"]
-        colors = ['#CFD8DC', '#FF9999', '#99CCFF', '#FFCC99', '#CFD8DC']
-        
-        x_centers = []
-        y_centers = []
-        text_labels = []
-        
-        for cnt, angle, label in zip(sizes, angles_center, labels):
-            rad = angle * np.pi / 180
-            r_pos = 1.3 # テキストを配置する半径
-            x_centers.append(r_pos * np.cos(rad))
-            y_centers.append(r_pos * np.sin(rad))
-            pct = (cnt / total_dir) * 100
-            # 0本の場合は表示をスッキリさせる
-            if cnt > 0:
-                text_labels.append(f"{label}<br>{cnt}本<br>({pct:.1f}%)")
-            else:
-                text_labels.append("")
-
+        # 4. 一括でテキストを描画する
         fig_dir.add_trace(go.Scatter(
-            x=x_centers,
-            y=y_centers,
-            mode='markers+text',
-            marker=dict(
-                size=marker_sizes,
-                color=colors,
-                line=dict(color='white', width=2)
-            ),
-            text=text_labels,
+            x=text_x,
+            y=text_y,
+            mode='text',
+            text=texts,
             textposition='middle center',
-            textfont=dict(color='black', size=13, weight='bold'),
+            textfont=dict(color='black', size=16),
             hoverinfo='none'
         ))
 
         fig_dir.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.8, 1.8]),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.1, 1.9]),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.1, 2.0]),
             plot_bgcolor='white',
             margin=dict(l=10, r=10, t=10, b=10),
             showlegend=False,
@@ -405,4 +451,4 @@ else:
         
         st.plotly_chart(fig_dir, use_container_width=True)
     else:
-        st.info("※ この条件ではグラウンドに飛んだ打球のデータがありません（三振や四死球のみなど）")
+        st.info("※ この条件ではフェアゾーンに飛んだ打球のデータがありません")
