@@ -53,18 +53,21 @@ def add_advanced_stats(df):
             np.where(res.str.contains('三振|四球|死球|敬遠'), '非打球(三振/四死球)',
             '凡打/アウト'))))))
     
-    # 扇形グラウンド用 30度ごとの方向判定
-    is_foul = res.str.contains('邪')
-    is_left = res.str.contains('左|三|遊')
-    is_center = res.str.contains('中|投|捕')
-    is_right = res.str.contains('右|一|二')
+    # 🌟 修正ポイント: 扇形グラウンド用 30度ごとの方向判定（カタカナ対応・中間対応）
+    is_foul = res.str.contains('邪|ファウル', na=False)
+    
+    # 左、右のキーワード網羅
+    is_left = res.str.contains('左|三|遊|レフト|サード|ショート', na=False)
+    is_right = res.str.contains('右|一|二|ライト|ファースト|セカンド', na=False)
+    # 「左中間」「右中間」には「中」が含まれるため、単独の「中」と区別する
+    is_center = res.str.contains('投|捕|ピッチャー|キャッチャー', na=False) | (res.str.contains('中|センター', na=False) & ~res.str.contains('左中間|右中間', na=False))
     
     d_cat = np.where(is_foul & is_left, '左ファウル',
             np.where(is_foul & is_right, '右ファウル',
             np.where(is_foul, '後ろファウル',
             np.where(~is_foul & is_left, '左方向',
-            np.where(~is_foul & is_center, 'センター',
-            np.where(~is_foul & is_right, '右方向', '不明'))))))
+            np.where(~is_foul & is_right, '右方向',  # 優先順位: 左右 > センター
+            np.where(~is_foul & is_center, 'センター', '不明'))))))
             
     df['打球結果_詳細'] = r_cat
     df['打球方向_30'] = d_cat
