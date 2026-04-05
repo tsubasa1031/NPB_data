@@ -60,7 +60,7 @@ def add_advanced_stats(df):
                 np.where(res.str.contains('邪飛'), 'ファウルフライ', 'その他')))))))))))))
     df['純粋な結果'] = res_clean
     
-    # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加（復活）
+    # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加
     is_out_list = ['三振', '犠打', '犠飛', 'ゴロ', 'フライ', 'ライナー', 'ファウルフライ', 'その他']
     df['is_out'] = df['純粋な結果'].isin(is_out_list).astype('int8')
     df['is_dp'] = (df['純粋な結果'] == '併殺打').astype('int8')
@@ -91,7 +91,7 @@ def add_advanced_stats(df):
     return df
 
 @st.cache_data(max_entries=1)
-def load_and_clean_data():
+def load_and_clean_data_v2():
     try:
         df = pd.read_parquet("all_matchup_data.parquet")
     except FileNotFoundError:
@@ -124,7 +124,7 @@ def load_and_clean_data():
     return df, None
 
 @st.cache_data(max_entries=1)
-def load_directories():
+def load_directories_v2():
     files = glob.glob("player_directory_*.csv")
     df_list = []
     for f in files:
@@ -134,6 +134,19 @@ def load_directories():
             pass
     if df_list:
         return pd.concat(df_list, ignore_index=True).drop_duplicates(subset=['チーム', '選手名'])
+    return pd.DataFrame()
+
+@st.cache_data(max_entries=1)
+def load_season_dates():
+    """Gitにアップされた season_dates.csv を読み込む"""
+    if os.path.exists("season_dates.csv"):
+        try:
+            df_dates = pd.read_csv("season_dates.csv")
+            df_dates['CS開始日'] = pd.to_datetime(df_dates['CS開始日'])
+            df_dates['NS開始日'] = pd.to_datetime(df_dates['NS開始日'])
+            return df_dates
+        except Exception:
+            pass
     return pd.DataFrame()
 
 def format_rate(val):
@@ -157,8 +170,9 @@ def format_ip(outs):
 st.title("⚾ NPB 超高度データ分析ダッシュボード")
 
 with st.spinner("データを準備しています..."):
-    df, error_msg = load_and_clean_data()
-    df_dir = load_directories()
+    df, error_msg = load_and_clean_data_v2()
+    df_dir = load_directories_v2()
+    df_dates = load_season_dates()
 
 if error_msg:
     st.error(error_msg)
@@ -168,9 +182,65 @@ st.sidebar.header("🔍 分析設定")
 
 analysis_mode = st.sidebar.radio("分析モード", ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"])
 
+# --- 1. データ範囲と絞り込み ---
+st.sidebar.markdown("### 📅 データ抽出条件")
 team_options = ["全球団", "巨人", "阪神", "中日", "DeNA", "広島", "ヤクルト", "オリックス", "ロッテ", "ソフトバンク", "楽天", "西武", "日本ハム"]
 selected_team = st.sidebar.selectbox("球団で絞り込み", team_options)
 
+years = sorted(df['年度'].unique(), reverse=True)
+selected_year = st.sidebar.selectbox("表示する年度", ["全年度"] + list(years))
+
+st.sidebar.markdown("#### 🏆 試合種類")
+include_cs = st.sidebar.checkbox("クライマックスシリーズ (CS) を含める", value=True)
+include_ns = st.sidebar.checkbox("日本シリーズ (NS) を含める", value=True)
+
+# データ絞り込みの実行
+filtered_df = df.copy()
+
+if selected_team != "全球団":
+    filtered_df = filtered_df[(filtered_df['投手チーム'] == selected_team) | (filtered_df['打者チーム'] == selected_team)]
+
+if selected_year != "全年度":
+    filtered_df = filtered_df[filtered_df['年度'] == selected_year]
+
+# 🌟 ポストシーズンの判定ロジック（CSVを使った完璧なフィルタリング）
+if not include_cs or not include_ns:
+    if not df_dates.empty:
+        # 日付を比較用にDatetime化（一時的）
+        filtered_df['日付_dt'] = pd.to_datetime(filtered_df['日付'])
+        drop_indices = []
+        
+        for y in filtered_df['年度'].unique():
+            y_dates = df_dates[df_dates['年度'] == y]
+            if not y_dates.empty:
+                cs_start = y_dates.iloc[0]['CS開始日']
+                ns_start = y_dates.iloc[0]['NS開始日']
+                
+                if not include_cs and not include_ns:
+                    # レギュラーシーズンのみ（CS開始日以降を除外）
+                    idx = filtered_df[(filtered_df['年度'] == y) & (filtered_df['日付_dt'] >= cs_start)].index
+                    drop_indices.extend(idx)
+                elif not include_ns:
+                    # NSを除外（NS開始日以降を除外）
+                    idx = filtered_df[(filtered_df['年度'] == y) & (filtered_df['日付_dt'] >= ns_start)].index
+                    drop_indices.extend(idx)
+        
+        filtered_df = filtered_df.drop(drop_indices)
+        filtered_df = filtered_df.drop(columns=['日付_dt'])
+    else:
+        st.sidebar.caption("※ season_dates.csv が見つからないため、10月中旬以降を簡易的に除外します。")
+        filtered_df['month'] = pd.to_datetime(filtered_df['日付']).dt.month
+        filtered_df['day'] = pd.to_datetime(filtered_df['日付']).dt.day
+        if not include_cs and not include_ns:
+            cond = ~(((filtered_df['month'] == 10) & (filtered_df['day'] >= 15)) | (filtered_df['month'] >= 11))
+            filtered_df = filtered_df[cond]
+        elif not include_ns:
+            cond = ~(((filtered_df['month'] == 10) & (filtered_df['day'] >= 25)) | (filtered_df['month'] >= 11))
+            filtered_df = filtered_df[cond]
+
+st.sidebar.markdown("---")
+
+# 球団所属選手の自動入力ボタン
 if selected_team != "全球団" and not df_dir.empty:
     team_players = sorted(df_dir[df_dir['チーム'] == selected_team]['選手名'].unique())
     with st.sidebar.expander(f"💡 {selected_team} の所属選手 (クリックで自動入力)"):
@@ -187,15 +257,6 @@ if selected_team != "全球団" and not df_dir.empty:
                     else:
                         st.session_state.input_batter = p
                 st.rerun()
-
-filtered_df = df.copy()
-if selected_team != "全球団":
-    filtered_df = filtered_df[(filtered_df['投手チーム'] == selected_team) | (filtered_df['打者チーム'] == selected_team)]
-
-years = sorted(filtered_df['年度'].unique(), reverse=True)
-selected_year = st.sidebar.selectbox("表示する年度", ["全年度"] + list(years))
-if selected_year != "全年度":
-    filtered_df = filtered_df[filtered_df['年度'] == selected_year]
 
 all_pitchers = sorted(filtered_df['投手'].dropna().unique())
 all_batters = sorted(filtered_df['打者'].dropna().unique())
@@ -266,7 +327,7 @@ else:
 st.subheader(f"{title_text} ({selected_year})")
 
 if target_df.empty:
-    st.warning("該当する対戦データがありません。")
+    st.warning("該当する対戦データがありません。条件を変更してください。")
 else:
     # --- 📈 全指標の計算 ---
     pa = target_df['is_PA'].sum()
@@ -297,7 +358,7 @@ else:
     slg = tb / ab if ab > 0 else 0.0
     ops = obp + slg
     
-    # 投手用セイバー (防御率やW-Lはスコアがないため計算不可)
+    # 投手用セイバー
     whip = (bb + h) / ip if ip > 0 else 0.0
     fip = ((13*hr + 3*bb - 2*so) / ip) + 3.10 if ip > 0 else 0.0
     k_bb = so / bb if bb > 0 else float(so)
@@ -312,7 +373,6 @@ else:
 
     # 打者用セイバー
     isod = obp - avg
-    # wOBAは簡易的な標準係数を用いて計算
     woba = (0.69*bb + 0.89*single + 1.27*double + 1.62*triple + 2.10*hr) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
     rc = ((h + bb) * tb) / (ab + bb) if (ab + bb) > 0 else 0.0
     
@@ -324,7 +384,6 @@ else:
         'IsoD': isod, 'wOBA': woba, 'RC': rc
     }
 
-    # カスタムCSSでMetricsを見やすくする
     st.markdown("""
     <style>
     div[data-testid="metric-container"] {
@@ -494,14 +553,14 @@ else:
             text_y.append(text_r * np.sin(rad_text))
             
             pct_str = f"{ratio*100:.0f}%"
-            # ご要望のフォーマットに合わせて表示テキストを変更
+            # 〇〇本（〇〇%） 下段：うち安打〇本（〇〇%） のご要望フォーマット
             if cnt > 0:
                 hit_pct = (hit_cnt / cnt) * 100
                 texts.append(f"<span style='font-size:28px'><b>{cnt}</b></span><span style='font-size:18px'>({pct_str})</span><br><span style='font-size:14px'>うち安打{hit_cnt}({hit_pct:.0f}%)</span>")
             else:
                 texts.append("")
                 
-            # 扇形の外側に「左方向 (105-135°)」のようなラベルを添える
+            # 扇形の外側のラベル
             label_r = 1.85
             fig_dir.add_trace(go.Scatter(
                 x=[label_r * np.cos(rad_text)],
@@ -524,7 +583,7 @@ else:
             line=dict(color='black', width=2), hoverinfo='skip'
         ))
         
-        # 内野の土のライン（デザインのアクセントとして白線）
+        # 内野の土のライン（白線）
         theta_inner = np.linspace(45, 135, 50) * np.pi / 180
         x_inner = 0.5 * np.cos(theta_inner)
         y_inner = 0.5 * np.sin(theta_inner)
