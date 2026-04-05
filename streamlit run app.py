@@ -60,7 +60,7 @@ def add_advanced_stats(df):
                 np.where(res.str.contains('邪飛'), 'ファウルフライ', 'その他')))))))))))))
     df['純粋な結果'] = res_clean
     
-    # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加
+    # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加（復活）
     is_out_list = ['三振', '犠打', '犠飛', 'ゴロ', 'フライ', 'ライナー', 'ファウルフライ', 'その他']
     df['is_out'] = df['純粋な結果'].isin(is_out_list).astype('int8')
     df['is_dp'] = (df['純粋な結果'] == '併殺打').astype('int8')
