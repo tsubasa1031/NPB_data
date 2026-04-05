@@ -26,42 +26,47 @@ if 'input_batter' not in st.session_state:
 def add_advanced_stats(df):
     """結果のテキストからフラグを生成し、打球方向などを高速で分類する"""
     df = df.copy()
-    res = df['結果'].fillna('')
+    # 欠損値対策として、確実に全てを文字列型にしてから処理する
+    res = df['結果'].astype(str).fillna('')
     
-    # 1. 基本的なフラグの作成（int8型を使ってメモリを極限まで節約）
+    # 1. 基本フラグの作成（確実に 0 と 1 の数値データにするため .astype('int8') を徹底）
     df['is_PA'] = np.int8(1)
-    df['is_BB_HBP'] = res.str.contains('四球|死球|敬遠', na=False)
-    df['is_SAC'] = res.str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
-    df['is_SF'] = res.str.contains('犠飛|犠牲フライ', na=False)
-    df['is_SO'] = res.str.contains('三振', na=False)
+    df['is_BB_HBP'] = res.str.contains('四球|死球|敬遠', na=False).astype('int8')
+    df['is_SAC'] = res.str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False).astype('int8')
+    df['is_SF'] = res.str.contains('犠飛|犠牲フライ', na=False).astype('int8')
+    df['is_SO'] = res.str.contains('三振', na=False).astype('int8')
     
-    df['is_H'] = res.str.contains('安打|ヒット|二塁打|ツーベース|三塁打|スリーベース|本塁打|ホームラン', na=False)
-    df['is_2B'] = res.str.contains('二塁打|ツーベース', na=False)
-    df['is_3B'] = res.str.contains('三塁打|スリーベース', na=False)
-    df['is_HR'] = res.str.contains('本塁打|ホームラン', na=False)
-    df['is_1B'] = df['is_H'] & ~df['is_2B'] & ~df['is_3B'] & ~df['is_HR']
+    df['is_H'] = res.str.contains('安打|ヒット|二塁打|ツーベース|三塁打|スリーベース|本塁打|ホームラン', na=False).astype('int8')
+    df['is_2B'] = res.str.contains('二塁打|ツーベース', na=False).astype('int8')
+    df['is_3B'] = res.str.contains('三塁打|スリーベース', na=False).astype('int8')
+    df['is_HR'] = res.str.contains('本塁打|ホームラン', na=False).astype('int8')
+    # 単打の判定（安打であり、かつ二塁打・三塁打・本塁打ではない）
+    df['is_1B'] = (df['is_H'] & ~df['is_2B'] & ~df['is_3B'] & ~df['is_HR']).astype('int8')
     
-    df['is_AB'] = df['is_PA'] - df['is_BB_HBP'].astype('int8') - df['is_SAC'].astype('int8')
-    df['TB'] = df['is_1B'].astype('int8')*1 + df['is_2B'].astype('int8')*2 + df['is_3B'].astype('int8')*3 + df['is_HR'].astype('int8')*4
+    # 打数と塁打の確実な数値計算
+    df['is_AB'] = df['is_PA'] - df['is_BB_HBP'] - df['is_SAC']
+    df['TB'] = df['is_1B'] * 1 + df['is_2B'] * 2 + df['is_3B'] * 3 + df['is_HR'] * 4
     
     # 2. 純粋な結果（方向抜きの詳細結果）
-    res_clean = np.where(res.str.contains('三振'), '三振',
-                np.where(res.str.contains('四球|死球|敬遠'), '四死球',
-                np.where(res.str.contains('犠打|犠牲バント'), '犠打',
-                np.where(res.str.contains('犠飛|犠牲フライ'), '犠飛',
-                np.where(res.str.contains('本塁打|ホームラン'), '本塁打',
-                np.where(res.str.contains('三塁打|スリーベース'), '三塁打',
-                np.where(res.str.contains('二塁打|ツーベース'), '二塁打',
-                np.where(res.str.contains('安打|ヒット'), '単打',
-                np.where(res.str.contains('併殺'), '併殺打',
-                np.where(res.str.contains('ゴロ'), 'ゴロ',
-                np.where(res.str.contains('飛|フライ'), 'フライ',
-                np.where(res.str.contains('直|ライナー'), 'ライナー',
-                np.where(res.str.contains('邪飛'), 'ファウルフライ', 'その他')))))))))))))
+    # np.where のバグを防ぐため、作成済みの 1/0 フラグを優先して利用する
+    res_clean = np.where(df['is_SO'] == 1, '三振',
+                np.where(df['is_BB_HBP'] == 1, '四死球',
+                np.where(res.str.contains('犠打|犠牲バント', na=False), '犠打',
+                np.where(df['is_SF'] == 1, '犠飛',
+                np.where(df['is_HR'] == 1, '本塁打',
+                np.where(df['is_3B'] == 1, '三塁打',
+                np.where(df['is_2B'] == 1, '二塁打',
+                np.where(df['is_1B'] == 1, '単打',
+                np.where(res.str.contains('併殺', na=False), '併殺打',
+                np.where(res.str.contains('ゴロ', na=False), 'ゴロ',
+                np.where(res.str.contains('飛|フライ', na=False), 'フライ',
+                np.where(res.str.contains('直|ライナー', na=False), 'ライナー',
+                np.where(res.str.contains('邪飛', na=False), 'ファウルフライ', 'その他')))))))))))))
     df['純粋な結果'] = res_clean
     
     # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加
-    is_out_list = ['三振', '犠打', '犠飛', 'ゴロ', 'フライ', 'ライナー', 'ファウルフライ', 'その他']
+    # パース漏れの「その他」がアウトに計算されないよう、明確なアウト結果のみを指定
+    is_out_list = ['三振', '犠打', '犠飛', 'ゴロ', 'フライ', 'ライナー', 'ファウルフライ']
     df['is_out'] = df['純粋な結果'].isin(is_out_list).astype('int8')
     df['is_dp'] = (df['純粋な結果'] == '併殺打').astype('int8')
     df['outs'] = df['is_out'] + (df['is_dp'] * 2) # 併殺は2アウト
@@ -90,8 +95,9 @@ def add_advanced_stats(df):
         
     return df
 
+# 🌟 古いキャッシュの呪縛を断ち切るために v3 にアップデート
 @st.cache_data(max_entries=1)
-def load_and_clean_data_v2():
+def load_and_clean_data_v3():
     try:
         df = pd.read_parquet("all_matchup_data.parquet")
     except FileNotFoundError:
@@ -124,7 +130,7 @@ def load_and_clean_data_v2():
     return df, None
 
 @st.cache_data(max_entries=1)
-def load_directories_v2():
+def load_directories_v3():
     files = glob.glob("player_directory_*.csv")
     df_list = []
     for f in files:
@@ -137,7 +143,7 @@ def load_directories_v2():
     return pd.DataFrame()
 
 @st.cache_data(max_entries=1)
-def load_season_dates():
+def load_season_dates_v3():
     """Gitにアップされた season_dates.csv を読み込む"""
     if os.path.exists("season_dates.csv"):
         try:
@@ -170,9 +176,9 @@ def format_ip(outs):
 st.title("⚾ NPB 超高度データ分析ダッシュボード")
 
 with st.spinner("データを準備しています..."):
-    df, error_msg = load_and_clean_data_v2()
-    df_dir = load_directories_v2()
-    df_dates = load_season_dates()
+    df, error_msg = load_and_clean_data_v3()
+    df_dir = load_directories_v3()
+    df_dates = load_season_dates_v3()
 
 if error_msg:
     st.error(error_msg)
@@ -368,263 +374,4 @@ else:
     babip = (h - hr) / (ab - so - hr + sf) if (ab - so - hr + sf) > 0 else 0.0
     
     gb_pct = gb / total_batted if total_batted > 0 else 0.0
-    fb_pct = fb / total_batted if total_batted > 0 else 0.0
-    ld_pct = ld / total_batted if total_batted > 0 else 0.0
-
-    # 打者用セイバー
-    isod = obp - avg
-    woba = (0.69*bb + 0.89*single + 1.27*double + 1.62*triple + 2.10*hr) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
-    rc = ((h + bb) * tb) / (ab + bb) if (ab + bb) > 0 else 0.0
-    
-    stats = {
-        'PA': pa, 'AB': ab, 'H': h, 'HR': hr, 'RBI': rbi, 'SO': so, 'BB': bb, 'outs': outs, 'IP': ip,
-        'AVG': avg, 'OBP': obp, 'SLG': slg, 'OPS': ops,
-        'WHIP': whip, 'FIP': fip, 'K_BB': k_bb, 'K_pct': k_pct, 'BB_pct': bb_pct, 'K_minus_BB_pct': k_minus_bb_pct, 'BABIP': babip,
-        'GB_pct': gb_pct, 'FB_pct': fb_pct, 'LD_pct': ld_pct,
-        'IsoD': isod, 'wOBA': woba, 'RC': rc
-    }
-
-    st.markdown("""
-    <style>
-    div[data-testid="metric-container"] {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 5% 5% 5% 10%;
-        border-radius: 5px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # ---------------------------------------------------------
-    # 🌟 モード別・指標の出し分け表示
-    # ---------------------------------------------------------
-    if analysis_mode == "投手視点で分析":
-        st.markdown("#### ⚾ 1. 伝統的な基本指標（結果）")
-        st.info("※プレイバイプレイの積み上げデータのため、失点(ERA)や勝敗(W-L)は算出できません。投球回(IP)は奪アウト数からの推定値です。")
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("対戦打席 (PA)", stats['PA'])
-        c2.metric("投球回 (IP)", format_ip(stats['outs']))
-        c3.metric("被安打 (H)", stats['H'])
-        c4.metric("被本塁打 (HR)", stats['HR'])
-        c5.metric("奪三振 (K)", stats['SO'])
-        c6.metric("与四死球 (BB/HBP)", stats['BB'])
-
-        st.markdown("<br>#### 🔬 2. セイバーメトリクス指標（投球内容の評価）", unsafe_allow_html=True)
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("FIP", f"{stats['FIP']:.2f}" if stats['IP'] > 0 else "-")
-        c2.metric("WHIP", f"{stats['WHIP']:.2f}" if stats['IP'] > 0 else "-")
-        c3.metric("K/BB", f"{stats['K_BB']:.2f}" if stats['BB'] > 0 else ("MAX" if stats['SO'] > 0 else "-"))
-        c4.metric("K%", f"{stats['K_pct']*100:.1f}%")
-        c5.metric("K-BB%", f"{stats['K_minus_BB_pct']*100:.1f}%")
-        c6.metric("BABIP", format_rate(stats['BABIP']))
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        c7, c8, c9, c10 = st.columns(4)
-        c7.metric("ゴロ割合 (GB%)", f"{stats['GB_pct']*100:.1f}%")
-        c8.metric("フライ割合 (FB%)", f"{stats['FB_pct']*100:.1f}%")
-        c9.metric("ライナー割合 (LD%)", f"{stats['LD_pct']*100:.1f}%")
-
-    elif analysis_mode == "打者視点で分析":
-        st.markdown("#### ⚾ 1. 基本指標（クラシックスタッツ）")
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-        c1.metric("打席 (PA)", stats['PA'])
-        c2.metric("打数 (AB)", stats['AB'])
-        c3.metric("安打 (H)", stats['H'])
-        c4.metric("本塁打 (HR)", stats['HR'])
-        c5.metric("打点 (RBI)", stats['RBI'])
-        c6.metric("三振 (SO)", stats['SO'])
-        c7.metric("四死球 (BB/HBP)", stats['BB'])
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        c8, c9, c10, c11 = st.columns(4)
-        c8.metric("打率 (AVG)", format_rate(stats['AVG']))
-        c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
-        c10.metric("長打率 (SLG)", format_rate(stats['SLG']))
-        c11.metric("OPS", format_rate(stats['OPS']))
-
-        st.markdown("<br>#### 🔬 2. 総合評価・セイバーメトリクス指標", unsafe_allow_html=True)
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("wOBA", format_rate(stats['wOBA']))
-        c2.metric("RC (推定)", f"{stats['RC']:.1f}")
-        c3.metric("IsoD", format_rate(stats['IsoD']))
-        c4.metric("BABIP", format_rate(stats['BABIP']))
-        c5.metric("K%", f"{stats['K_pct']*100:.1f}%")
-        c6.metric("BB%", f"{stats['BB_pct']*100:.1f}%")
-
-    else:
-        st.markdown("#### ⚔️ 対戦成績（基本指標・セイバーメトリクス）")
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-        c1.metric("打席 (PA)", stats['PA'])
-        c2.metric("打数 (AB)", stats['AB'])
-        c3.metric("安打 (H)", stats['H'])
-        c4.metric("本塁打 (HR)", stats['HR'])
-        c5.metric("打点 (RBI)", stats['RBI'])
-        c6.metric("三振 (SO)", stats['SO'])
-        c7.metric("四死球 (BB/HBP)", stats['BB'])
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        c8, c9, c10, c11, c12 = st.columns(5)
-        c8.metric("打率 (AVG)", format_rate(stats['AVG']))
-        c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
-        c10.metric("OPS", format_rate(stats['OPS']))
-        c11.metric("K%", f"{stats['K_pct']*100:.1f}%")
-        c12.metric("BABIP", format_rate(stats['BABIP']))
-
-
-    st.markdown("---")
-
-    # --- 📊 円グラフと詳細棒グラフ ---
-    col_g1, col_g2 = st.columns(2)
-    
-    with col_g1:
-        st.markdown("#### 🎯 打席結果の割合")
-        result_counts = target_df['打席結果'].value_counts().reset_index()
-        result_counts.columns = ['打席結果', '回数']
-        fig1 = px.pie(result_counts, values='回数', names='打席結果', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with col_g2:
-        st.markdown("#### ⚾ 詳細な結果 (方向なし)")
-        detail_counts = target_df['純粋な結果'].value_counts().head(10).reset_index()
-        detail_counts.columns = ['結果', '回数']
-        fig2 = px.bar(detail_counts, x='回数', y='結果', orientation='h', color='回数', color_continuous_scale='Blues')
-        fig2.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-
-    # --- 🌟 打球方向の扇形チャート (ファウル排除・40%以上で色変更) ---
-    st.markdown("#### 🏟️ 飛びやすい打球方向 (フェアゾーンのみ)")
-    
-    # ファウルや三振などを除外し、フェアグラウンドに飛んだ打球のみを抽出
-    fair_df = target_df[target_df['打球方向_30'].isin(['左方向', 'センター', '右方向'])]
-    total_fair = len(fair_df)
-    
-    if total_fair > 0:
-        fig_dir = go.Figure()
-        
-        directions = ['左方向', 'センター', '右方向']
-        thetas = [120, 90, 60]  # 各方向の中心角
-        
-        # 1. 扇形のベース色と、4割以上(Hot)の場合の強調色の定義
-        color_map = {
-            '左方向': {'normal': '#FFE0B2', 'hot': '#FFA726'},  # オレンジ系
-            'センター': {'normal': '#F5F5F5', 'hot': '#BDBDBD'},  # グレー系
-            '右方向': {'normal': '#F8BBD0', 'hot': '#EF5350'}   # ピンク/赤系
-        }
-        
-        text_x = []
-        text_y = []
-        texts = []
-        
-        # 2. 各方向ごとの扇形塗りつぶしと集計
-        for d, t in zip(directions, thetas):
-            d_df = fair_df[fair_df['打球方向_30'] == d]
-            cnt = len(d_df)
-            hit_cnt = len(d_df[d_df['is_H']]) # その方向への安打数
-            ratio = cnt / total_fair if total_fair > 0 else 0
-            
-            # 全体の40%以上飛んでいれば強調色にする
-            is_hot = ratio >= 0.4
-            fill_color = color_map[d]['hot'] if is_hot else color_map[d]['normal']
-            
-            # 扇形ポリゴンの描画（15度〜15度で30度の幅を作る）
-            start_angle = t - 15
-            end_angle = t + 15
-            theta_arc = np.linspace(start_angle, end_angle, 30) * np.pi / 180
-            x_arc = 1.7 * np.cos(theta_arc)
-            y_arc = 1.7 * np.sin(theta_arc)
-            
-            fig_dir.add_trace(go.Scatter(
-                x=[0] + list(x_arc) + [0],
-                y=[0] + list(y_arc) + [0],
-                mode='lines',
-                fill='toself',
-                fillcolor=fill_color,
-                line=dict(color='white', width=0),
-                hoverinfo='skip',
-                opacity=0.9
-            ))
-            
-            # テキストの内容を作成
-            rad_text = t * np.pi / 180
-            text_r = 1.1 # 円弧の中央あたりに文字を配置
-            text_x.append(text_r * np.cos(rad_text))
-            text_y.append(text_r * np.sin(rad_text))
-            
-            pct_str = f"{ratio*100:.0f}%"
-            # 〇〇本（〇〇%） 下段：うち安打〇本（〇〇%） のご要望フォーマット
-            if cnt > 0:
-                hit_pct = (hit_cnt / cnt) * 100
-                texts.append(f"<span style='font-size:28px'><b>{cnt}</b></span><span style='font-size:18px'>({pct_str})</span><br><span style='font-size:14px'>うち安打{hit_cnt}({hit_pct:.0f}%)</span>")
-            else:
-                texts.append("")
-                
-            # 扇形の外側のラベル
-            label_r = 1.85
-            fig_dir.add_trace(go.Scatter(
-                x=[label_r * np.cos(rad_text)],
-                y=[label_r * np.sin(rad_text)],
-                mode='text',
-                text=[f"{d}<br><span style='font-size:10px;color:gray'>({t-15}-{t+15}°)</span>"],
-                textfont=dict(color='gray', size=12),
-                hoverinfo='skip'
-            ))
-
-        # 3. グラウンドの外枠と区切り線を描く
-        # フェアゾーンの外枠線
-        theta_fair = np.linspace(45, 135, 100) * np.pi / 180
-        x_fair = 1.7 * np.cos(theta_fair)
-        y_fair = 1.7 * np.sin(theta_fair)
-        fig_dir.add_trace(go.Scatter(
-            x=[0] + list(x_fair) + [0], 
-            y=[0] + list(y_fair) + [0],
-            mode='lines',
-            line=dict(color='black', width=2), hoverinfo='skip'
-        ))
-        
-        # 内野の土のライン（白線）
-        theta_inner = np.linspace(45, 135, 50) * np.pi / 180
-        x_inner = 0.5 * np.cos(theta_inner)
-        y_inner = 0.5 * np.sin(theta_inner)
-        fig_dir.add_trace(go.Scatter(
-            x=list(x_inner),
-            y=list(y_inner),
-            mode='lines',
-            line=dict(color='white', width=2), hoverinfo='skip'
-        ))
-
-        # 30度ごとの区切り線（75度, 105度）
-        for angle in [75, 105]:
-            rad = angle * np.pi / 180
-            fig_dir.add_trace(go.Scatter(
-                x=[0, 1.7 * np.cos(rad)],
-                y=[0, 1.7 * np.sin(rad)],
-                mode='lines',
-                line=dict(color='white', width=2),
-                hoverinfo='skip'
-            ))
-
-        # 4. 一括でテキストを描画する
-        fig_dir.add_trace(go.Scatter(
-            x=text_x,
-            y=text_y,
-            mode='text',
-            text=texts,
-            textposition='middle center',
-            textfont=dict(color='black', size=16),
-            hoverinfo='none'
-        ))
-
-        fig_dir.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.8, 1.8]),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.1, 2.0]),
-            plot_bgcolor='white',
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=False,
-            height=450
-        )
-        
-        st.plotly_chart(fig_dir, use_container_width=True)
-    else:
-        st.info("※ この条件ではフェアゾーンに飛んだ打球のデータがありません")
+    fb_pct = fb / total_batted if total_batted > 0
