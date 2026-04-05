@@ -28,7 +28,7 @@ def add_advanced_stats(df):
     df = df.copy()
     res = df['結果'].fillna('')
     
-    # 1. 基本的なフラグの作成
+    # 1. 基本的なフラグの作成（int8型を使ってメモリを極限まで節約）
     df['is_PA'] = np.int8(1)
     df['is_BB_HBP'] = res.str.contains('四球|死球|敬遠', na=False)
     df['is_SAC'] = res.str.contains('犠打|犠牲バント|犠飛|犠牲フライ', na=False)
@@ -59,6 +59,16 @@ def add_advanced_stats(df):
                 np.where(res.str.contains('直|ライナー'), 'ライナー',
                 np.where(res.str.contains('邪飛'), 'ファウルフライ', 'その他')))))))))))))
     df['純粋な結果'] = res_clean
+    
+    # 🌟 投球回計算用の「奪アウト」と、打球性質(GB/FB/LD)フラグを追加
+    is_out_list = ['三振', '犠打', '犠飛', 'ゴロ', 'フライ', 'ライナー', 'ファウルフライ', 'その他']
+    df['is_out'] = df['純粋な結果'].isin(is_out_list).astype('int8')
+    df['is_dp'] = (df['純粋な結果'] == '併殺打').astype('int8')
+    df['outs'] = df['is_out'] + (df['is_dp'] * 2) # 併殺は2アウト
+    
+    df['is_GB'] = df['純粋な結果'].isin(['ゴロ', '併殺打']).astype('int8')
+    df['is_FB'] = df['純粋な結果'].isin(['フライ', 'ファウルフライ']).astype('int8')
+    df['is_LD'] = (df['純粋な結果'] == 'ライナー').astype('int8')
     
     # 3. 扇形グラウンド用 30度ごとの方向判定
     is_foul = res.str.contains('邪|ファウル', na=False)
@@ -130,6 +140,17 @@ def format_rate(val):
     if val >= 1.0: return f"{val:.3f}"
     return f".{str(int(val * 1000)).zfill(3)}"
 
+def format_ip(outs):
+    """アウト数から投球回（IP）の表記に変換する"""
+    full_innings = outs // 3
+    remainder = outs % 3
+    if remainder == 1:
+        return f"{full_innings}.1"
+    elif remainder == 2:
+        return f"{full_innings}.2"
+    else:
+        return f"{full_innings}.0"
+
 # =====================================================================
 # UI 構築とサイドバー
 # =====================================================================
@@ -145,19 +166,16 @@ if error_msg:
 
 st.sidebar.header("🔍 分析設定")
 
-# モード選択を先に配置
 analysis_mode = st.sidebar.radio("分析モード", ["投手視点で分析", "打者視点で分析", "特定の対戦 (投手 vs 打者)"])
 
 team_options = ["全球団", "巨人", "阪神", "中日", "DeNA", "広島", "ヤクルト", "オリックス", "ロッテ", "ソフトバンク", "楽天", "西武", "日本ハム"]
 selected_team = st.sidebar.selectbox("球団で絞り込み", team_options)
 
-# 🌟 球団所属選手を「クリックで自動セット」するUIに変更
 if selected_team != "全球団" and not df_dir.empty:
     team_players = sorted(df_dir[df_dir['チーム'] == selected_team]['選手名'].unique())
     with st.sidebar.expander(f"💡 {selected_team} の所属選手 (クリックで自動入力)"):
         cols = st.columns(2)
         for i, p in enumerate(team_players):
-            # ボタンが押されたら、セッションステート（入力枠）に名前を放り込んで画面をリロード
             if cols[i%2].button(p, key=f"btn_team_{p}"):
                 if analysis_mode == "投手視点で分析":
                     st.session_state.input_pitcher = p
@@ -184,7 +202,6 @@ all_batters = sorted(filtered_df['打者'].dropna().unique())
 all_players = sorted(list(set(all_pitchers) | set(all_batters)))
 player_options = [""] + all_players
 
-# 予測変換入力欄
 if analysis_mode == "投手視点で分析":
     idx = player_options.index(st.session_state.input_pitcher) if st.session_state.input_pitcher in player_options else 0
     selected_pitcher = st.sidebar.selectbox("投手を選択 (タイピングで予測変換)", player_options, index=idx)
@@ -251,24 +268,63 @@ st.subheader(f"{title_text} ({selected_year})")
 if target_df.empty:
     st.warning("該当する対戦データがありません。")
 else:
-    stats = {
-        'PA': target_df['is_PA'].sum(),
-        'AB': target_df['is_AB'].sum(),
-        'H': target_df['is_H'].sum(),
-        'HR': target_df['is_HR'].sum(),
-        'RBI': target_df['打点'].sum(),
-        'SO': target_df['is_SO'].sum(),
-        'BB': target_df['is_BB_HBP'].sum(),
-    }
-    ab, h, bb, sf = stats['AB'], stats['H'], stats['BB'], target_df['is_SF'].sum()
+    # --- 📈 全指標の計算 ---
+    pa = target_df['is_PA'].sum()
+    ab = target_df['is_AB'].sum()
+    h = target_df['is_H'].sum()
+    hr = target_df['is_HR'].sum()
+    rbi = target_df['打点'].sum()
+    so = target_df['is_SO'].sum()
+    bb = target_df['is_BB_HBP'].sum()
+    sf = target_df['is_SF'].sum()
     tb = target_df['TB'].sum()
     
-    stats['AVG'] = h / ab if ab > 0 else 0.0
-    stats['OBP'] = (h + bb) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
-    stats['SLG'] = tb / ab if ab > 0 else 0.0
-    stats['OPS'] = stats['OBP'] + stats['SLG']
+    single = target_df['is_1B'].sum()
+    double = target_df['is_2B'].sum()
+    triple = target_df['is_3B'].sum()
+    
+    outs = target_df['outs'].sum()
+    ip = outs / 3.0
+    
+    gb = target_df['is_GB'].sum()
+    fb = target_df['is_FB'].sum()
+    ld = target_df['is_LD'].sum()
+    total_batted = gb + fb + ld
 
-    st.markdown("#### 📈 基本指標")
+    # 打率など
+    avg = h / ab if ab > 0 else 0.0
+    obp = (h + bb) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
+    slg = tb / ab if ab > 0 else 0.0
+    ops = obp + slg
+    
+    # 投手用セイバー (防御率やW-Lはスコアがないため計算不可)
+    whip = (bb + h) / ip if ip > 0 else 0.0
+    fip = ((13*hr + 3*bb - 2*so) / ip) + 3.10 if ip > 0 else 0.0
+    k_bb = so / bb if bb > 0 else float(so)
+    k_pct = so / pa if pa > 0 else 0.0
+    bb_pct = bb / pa if pa > 0 else 0.0
+    k_minus_bb_pct = k_pct - bb_pct
+    babip = (h - hr) / (ab - so - hr + sf) if (ab - so - hr + sf) > 0 else 0.0
+    
+    gb_pct = gb / total_batted if total_batted > 0 else 0.0
+    fb_pct = fb / total_batted if total_batted > 0 else 0.0
+    ld_pct = ld / total_batted if total_batted > 0 else 0.0
+
+    # 打者用セイバー
+    isod = obp - avg
+    # wOBAは簡易的な標準係数を用いて計算
+    woba = (0.69*bb + 0.89*single + 1.27*double + 1.62*triple + 2.10*hr) / (ab + bb + sf) if (ab + bb + sf) > 0 else 0.0
+    rc = ((h + bb) * tb) / (ab + bb) if (ab + bb) > 0 else 0.0
+    
+    stats = {
+        'PA': pa, 'AB': ab, 'H': h, 'HR': hr, 'RBI': rbi, 'SO': so, 'BB': bb, 'outs': outs, 'IP': ip,
+        'AVG': avg, 'OBP': obp, 'SLG': slg, 'OPS': ops,
+        'WHIP': whip, 'FIP': fip, 'K_BB': k_bb, 'K_pct': k_pct, 'BB_pct': bb_pct, 'K_minus_BB_pct': k_minus_bb_pct, 'BABIP': babip,
+        'GB_pct': gb_pct, 'FB_pct': fb_pct, 'LD_pct': ld_pct,
+        'IsoD': isod, 'wOBA': woba, 'RC': rc
+    }
+
+    # カスタムCSSでMetricsを見やすくする
     st.markdown("""
     <style>
     div[data-testid="metric-container"] {
@@ -279,22 +335,82 @@ else:
     }
     </style>
     """, unsafe_allow_html=True)
-    
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.metric("打席", stats['PA'])
-    c2.metric("打数", stats['AB'])
-    c3.metric("安打", stats['H'])
-    c4.metric("本塁打", stats['HR'])
-    c5.metric("打点", stats['RBI'])
-    c6.metric("三振", stats['SO'])
-    c7.metric("四死球", stats['BB'])
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    c8, c9, c10, c11 = st.columns(4)
-    c8.metric("打率 (AVG)", format_rate(stats['AVG']))
-    c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
-    c10.metric("長打率 (SLG)", format_rate(stats['SLG']))
-    c11.metric("OPS", format_rate(stats['OPS']))
+    # ---------------------------------------------------------
+    # 🌟 モード別・指標の出し分け表示
+    # ---------------------------------------------------------
+    if analysis_mode == "投手視点で分析":
+        st.markdown("#### ⚾ 1. 伝統的な基本指標（結果）")
+        st.info("※プレイバイプレイの積み上げデータのため、失点(ERA)や勝敗(W-L)は算出できません。投球回(IP)は奪アウト数からの推定値です。")
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("対戦打席 (PA)", stats['PA'])
+        c2.metric("投球回 (IP)", format_ip(stats['outs']))
+        c3.metric("被安打 (H)", stats['H'])
+        c4.metric("被本塁打 (HR)", stats['HR'])
+        c5.metric("奪三振 (K)", stats['SO'])
+        c6.metric("与四死球 (BB/HBP)", stats['BB'])
+
+        st.markdown("<br>#### 🔬 2. セイバーメトリクス指標（投球内容の評価）", unsafe_allow_html=True)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("FIP", f"{stats['FIP']:.2f}" if stats['IP'] > 0 else "-")
+        c2.metric("WHIP", f"{stats['WHIP']:.2f}" if stats['IP'] > 0 else "-")
+        c3.metric("K/BB", f"{stats['K_BB']:.2f}" if stats['BB'] > 0 else ("MAX" if stats['SO'] > 0 else "-"))
+        c4.metric("K%", f"{stats['K_pct']*100:.1f}%")
+        c5.metric("K-BB%", f"{stats['K_minus_BB_pct']*100:.1f}%")
+        c6.metric("BABIP", format_rate(stats['BABIP']))
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        c7, c8, c9, c10 = st.columns(4)
+        c7.metric("ゴロ割合 (GB%)", f"{stats['GB_pct']*100:.1f}%")
+        c8.metric("フライ割合 (FB%)", f"{stats['FB_pct']*100:.1f}%")
+        c9.metric("ライナー割合 (LD%)", f"{stats['LD_pct']*100:.1f}%")
+
+    elif analysis_mode == "打者視点で分析":
+        st.markdown("#### ⚾ 1. 基本指標（クラシックスタッツ）")
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1.metric("打席 (PA)", stats['PA'])
+        c2.metric("打数 (AB)", stats['AB'])
+        c3.metric("安打 (H)", stats['H'])
+        c4.metric("本塁打 (HR)", stats['HR'])
+        c5.metric("打点 (RBI)", stats['RBI'])
+        c6.metric("三振 (SO)", stats['SO'])
+        c7.metric("四死球 (BB/HBP)", stats['BB'])
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        c8, c9, c10, c11 = st.columns(4)
+        c8.metric("打率 (AVG)", format_rate(stats['AVG']))
+        c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
+        c10.metric("長打率 (SLG)", format_rate(stats['SLG']))
+        c11.metric("OPS", format_rate(stats['OPS']))
+
+        st.markdown("<br>#### 🔬 2. 総合評価・セイバーメトリクス指標", unsafe_allow_html=True)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("wOBA", format_rate(stats['wOBA']))
+        c2.metric("RC (推定)", f"{stats['RC']:.1f}")
+        c3.metric("IsoD", format_rate(stats['IsoD']))
+        c4.metric("BABIP", format_rate(stats['BABIP']))
+        c5.metric("K%", f"{stats['K_pct']*100:.1f}%")
+        c6.metric("BB%", f"{stats['BB_pct']*100:.1f}%")
+
+    else:
+        st.markdown("#### ⚔️ 対戦成績（基本指標・セイバーメトリクス）")
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1.metric("打席 (PA)", stats['PA'])
+        c2.metric("打数 (AB)", stats['AB'])
+        c3.metric("安打 (H)", stats['H'])
+        c4.metric("本塁打 (HR)", stats['HR'])
+        c5.metric("打点 (RBI)", stats['RBI'])
+        c6.metric("三振 (SO)", stats['SO'])
+        c7.metric("四死球 (BB/HBP)", stats['BB'])
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        c8, c9, c10, c11, c12 = st.columns(5)
+        c8.metric("打率 (AVG)", format_rate(stats['AVG']))
+        c9.metric("出塁率 (OBP)", format_rate(stats['OBP']))
+        c10.metric("OPS", format_rate(stats['OPS']))
+        c11.metric("K%", f"{stats['K_pct']*100:.1f}%")
+        c12.metric("BABIP", format_rate(stats['BABIP']))
+
 
     st.markdown("---")
 
@@ -378,9 +494,10 @@ else:
             text_y.append(text_r * np.sin(rad_text))
             
             pct_str = f"{ratio*100:.0f}%"
-            # 画像のように数字を大きく、内訳（安打数）を小さく表示
+            # ご要望のフォーマットに合わせて表示テキストを変更
             if cnt > 0:
-                texts.append(f"<span style='font-size:28px'><b>{cnt}</b></span><br><span style='font-size:24px'><b>{pct_str}</b></span><br><span style='font-size:13px'>(内、安打{hit_cnt}本)</span>")
+                hit_pct = (hit_cnt / cnt) * 100
+                texts.append(f"<span style='font-size:28px'><b>{cnt}</b></span><span style='font-size:18px'>({pct_str})</span><br><span style='font-size:14px'>うち安打{hit_cnt}({hit_pct:.0f}%)</span>")
             else:
                 texts.append("")
                 
